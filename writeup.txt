@@ -7,27 +7,24 @@ Date: November 17, 2025
 TASK 1: RATING PREDICTION
 --------------------------
 Approach:
-I implemented a matrix-factorization based collaborative filtering model with user/item biases.
+I implemented a matrix-factorization based collaborative filtering model with user/item biases, and I
+experimented with Surprise SVD but ultimately used a tuned manual MF model for the final predictions.
 
 1. I first load all 200,000 `(user, book, rating)` interactions and compute the global average rating.
-2. If the `surprise` library is available, I train a Surprise `SVD` model on the full interaction set:
-   - Input format: `userID bookID rating` (tab-separated).
-   - Parameters: `n_factors=50`, `reg_all=0.02`, `lr_all=0.005`, `n_epochs=40`, with biases enabled.
-   - Predictions are generated via `algo.predict(user, book).est`.
-3. If Surprise is not available, I fall back to a manual biased matrix factorization model:
-   - Build integer indices for users and items.
-   - Parameters:
-     * Global mean rating.
-     * User bias `b_u` and item bias `b_i`.
-     * Latent factors `p_u` and `q_i` of dimension `K=20`.
-   - Train with SGD over all interactions for 15 epochs:
-     * Prediction: `r̂ = μ + b_u + b_i + p_u · q_i`.
-     * Update biases and factors with learning rate `γ=0.01` and regularization `λ=0.02`.
-4. For the final predictions, I use the best available model (`Surprise SVD` if installed, else the manual MF)
-   and clip predictions to the valid rating range [0, 5].
+2. I build integer indices for users and items and maintain:
+   - Global mean rating `μ`.
+   - User bias `b_u` and item bias `b_i`.
+   - Latent factors `p_u` and `q_i` of dimension `K=20`.
+3. I train this biased MF model with SGD over all interactions for 15 epochs:
+   - Prediction: `r̂ = μ + b_u + b_i + p_u · q_i`.
+   - Update biases and factors with learning rate `γ=0.01` and regularization `λ=0.02`.
+4. I also implemented a Surprise `SVD` model (50 factors, 40 epochs, etc.) and confirmed that, on the public
+   leaderboard, it performed worse than the tuned manual MF. For the final submission I therefore rely on the
+   manual MF model.
+5. For the final predictions, I use this MF model and clip predictions to the valid rating range [0, 5].
 
-This approach captures both systematic user/item effects (biases) and latent structure (factors), and is
-substantially stronger than a simple global-mean or user-mean baseline.
+This approach captures both systematic user/item effects (biases) and latent structure (factors), and it
+substantially improves upon simple global-mean or user-mean baselines.
 
 
 TASK 2: READ PREDICTION
@@ -78,9 +75,11 @@ is available, and otherwise uses a custom dictionary-based logistic regression m
      * Use `TfidfVectorizer` with `ngram_range=(1,2)` (unigrams + bigrams),
        `max_features=50,000`, `min_df=3`, `max_df=0.8`.
      * Fit on training review texts to get sparse TF-IDF features.
-   - Classifier:
-     * Train a multinomial `LogisticRegression` with `C=2.0`, `penalty="l2"`, `solver="lbfgs"`,
-       `max_iter=5000`, and `n_jobs=-1`.
+   - Classifier and tuning:
+     * I split the data into 80% train / 20% validation and trained `LogisticRegression` models with
+       `C ∈ {0.5, 1.0, 2.0, 4.0}`, `penalty="l2"`, `solver="lbfgs"`, `max_iter=5000`, `n_jobs=-1`.
+     * I selected the `C` with the best validation accuracy (in my case `C=2.0`, with validation accuracy
+       around 0.76), then retrained a final model on all 100,000 reviews with this `C`.
    - Prediction:
      * Transform the test review texts from `test_Category.json.gz` with the same vectorizer,
        predict `genreID` with the trained classifier, and write `userID,reviewID,prediction` to
@@ -107,8 +106,9 @@ high category accuracy.
 IMPLEMENTATION NOTES
 --------------------
 - All code is in `assignment1.py`, which:
-  * Tries to use `surprise` (SVD) for rating prediction if installed, otherwise falls back to a
-    manual MF+bias model.
+  * Contains both a Surprise SVD implementation and a manual MF+bias model for rating prediction; after
+    empirical comparison, the final predictions use the tuned manual MF+bias model (the Surprise path is
+    left in the code but disabled for scoring).
   * Uses a custom logistic regression model for read prediction, followed by a 50/50 ranking-based
     threshold on test pairs.
   * Tries to use `sklearn` (`TfidfVectorizer` + `LogisticRegression`) for category prediction if

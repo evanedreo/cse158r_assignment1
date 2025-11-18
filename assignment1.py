@@ -78,7 +78,9 @@ print(f"Number of interactions: {len(interactions)}")
 print(f"Number of users: {len(userRatings)}")
 print(f"Number of books: {len(itemRatings)}")
 
-if SURPRISE_AVAILABLE:
+# NOTE: Surprise SVD hurt public MSE (worse than our manual MF),
+# so we force the fallback MF path for the final submission.
+if False and SURPRISE_AVAILABLE:
     # ---------------------------------------------------------------------
     # High-end model: Surprise SVD (matrix factorization with biases)
     # ---------------------------------------------------------------------
@@ -372,6 +374,10 @@ if SKLEARN_AVAILABLE:
     # ---------------------------------------------------------------------
     print("Using sklearn TF-IDF + LogisticRegression for category prediction...")
 
+    # Import here to avoid errors when sklearn is absent
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import accuracy_score
+
     texts = [r["review_text"] for r in train_reviews]
     y = [r["genreID"] for r in train_reviews]
 
@@ -385,8 +391,34 @@ if SKLEARN_AVAILABLE:
 
     X = vectorizer.fit_transform(texts)
 
+    # Hold out a validation split to tune C
+    Xtr, Xva, ytr, yva = train_test_split(X, y, test_size=0.2, random_state=0)
+
+    best_C = None
+    best_acc = -1.0
+    best_clf = None
+    for C in [0.5, 1.0, 2.0, 4.0]:
+        clf_tmp = LogisticRegression(
+            C=C,
+            penalty="l2",
+            solver="lbfgs",
+            max_iter=5000,
+            n_jobs=-1
+        )
+        clf_tmp.fit(Xtr, ytr)
+        pred_va = clf_tmp.predict(Xva)
+        acc_va = accuracy_score(yva, pred_va)
+        print(f"  C={C} -> validation accuracy: {acc_va:.4f}")
+        if acc_va > best_acc:
+            best_acc = acc_va
+            best_C = C
+            best_clf = clf_tmp
+
+    print(f"Best C on validation: {best_C} (acc={best_acc:.4f}); retraining on full data...")
+
+    # Retrain final model on all data with best C
     clf = LogisticRegression(
-        C=2.0,
+        C=best_C,
         penalty="l2",
         solver="lbfgs",
         max_iter=5000,
