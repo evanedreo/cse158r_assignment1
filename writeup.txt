@@ -7,94 +7,126 @@ Date: November 17, 2025
 TASK 1: RATING PREDICTION
 --------------------------
 Approach:
-I implemented a bias-based collaborative filtering model that predicts ratings using:
-1. Global average rating as the baseline (3.687)
-2. User bias: Each user's average deviation from the global mean
-3. Item bias: Each book's average deviation from the global mean
+I implemented a matrix-factorization based collaborative filtering model with user/item biases.
 
-The final prediction formula is:
-    prediction = global_average + user_bias + item_bias
+1. I first load all 200,000 `(user, book, rating)` interactions and compute the global average rating.
+2. If the `surprise` library is available, I train a Surprise `SVD` model on the full interaction set:
+   - Input format: `userID bookID rating` (tab-separated).
+   - Parameters: `n_factors=50`, `reg_all=0.02`, `lr_all=0.005`, `n_epochs=40`, with biases enabled.
+   - Predictions are generated via `algo.predict(user, book).est`.
+3. If Surprise is not available, I fall back to a manual biased matrix factorization model:
+   - Build integer indices for users and items.
+   - Parameters:
+     * Global mean rating.
+     * User bias `b_u` and item bias `b_i`.
+     * Latent factors `p_u` and `q_i` of dimension `K=20`.
+   - Train with SGD over all interactions for 15 epochs:
+     * Prediction: `r̂ = μ + b_u + b_i + p_u · q_i`.
+     * Update biases and factors with learning rate `γ=0.01` and regularization `λ=0.02`.
+4. For the final predictions, I use the best available model (`Surprise SVD` if installed, else the manual MF)
+   and clip predictions to the valid rating range [0, 5].
 
-Predictions are clipped to the valid rating range [0, 5].
-
-This approach significantly improves upon the baseline by capturing both user tendencies 
-(some users rate higher/lower on average) and item quality (some books are universally 
-better/worse rated). The model is simple but effective for this task.
-
-Expected improvement: This should reduce MSE significantly compared to the baseline which 
-only uses user averages without considering item-specific biases.
+This approach captures both systematic user/item effects (biases) and latent structure (factors), and is
+substantially stronger than a simple global-mean or user-mean baseline.
 
 
 TASK 2: READ PREDICTION
 ------------------------
 Approach:
-I implemented a hybrid approach combining popularity-based and user-specific signals:
+I implemented a logistic regression model over hand-crafted features, combined with a ranking-based
+thresholding strategy that enforces exactly 50% positive predictions on the test set (matching how the
+test data is constructed).
 
-1. Popularity baseline: Books accounting for the top 50% of interactions are marked as 
-   likely to be read
-2. Book exposure threshold: Books read at least 5 times in training data are considered 
-   more likely to be read
-3. User history tracking: For users we've seen before, we track which books they've 
-   interacted with
+1. From the interaction data, I build:
+   - `userBooks[u]`: set of books read by user `u`.
+   - `bookCount[b]`: number of interactions for book `b`.
+   - `userActivity[u]`: number of books read by user `u`.
+   - `bookAvgRating[b]`: average rating of book `b`.
+2. I use the rating model (`predict_rating`) to provide a predicted rating for any `(user, book)` pair.
+3. For each training interaction `(u, b, r)` I create:
+   - A positive example with label 1 and features:
+       * `f1 = log(1 + popularity(b))`
+       * `f2 = log(1 + activity(u))`
+       * `f3 = bookAvgRating(b) - globalAverage`
+       * `f4 = predict_rating(u, b) - globalAverage`
+   - One negative example (label 0) by sampling a random book `b'` that user `u` has not read and computing
+     the same features.
+4. I train a 5-parameter logistic regression model (4 features + bias) using SGD:
+   - Learning rate `0.01`, L2 regularization `1e-4`, 8 epochs.
+   - I log the logistic loss and training accuracy per epoch.
+5. For test-time prediction on `pairs_Read.csv`:
+   - I score every `(u, b)` pair with the logistic model (logit score `z`).
+   - I sort all test pairs by `z` in descending order and assign the top 50% as `1` (read) and the bottom 50%
+     as `0` (not read).
 
-The model predicts "1" (will read) if:
-- The book is in the popular set (top 50% of interactions), OR
-- The book has been read at least 5 times in training data
-
-This improves upon the baseline by better handling the boundary cases and using a more 
-refined popularity threshold.
-
-Expected improvement: Should achieve better accuracy than the baseline by using a more 
-nuanced popularity measure.
+This explicitly matches the 50/50 class balance on the test set and maximizes accuracy under that constraint,
+leading to significantly better performance than simple popularity thresholds.
 
 
 TASK 3: CATEGORY PREDICTION
 ---------------------------
 Approach:
-I implemented a multi-feature text classification system using:
+I implemented a text classification pipeline that prefers a TF-IDF + linear classifier model when `sklearn`
+is available, and otherwise uses a custom dictionary-based logistic regression model with engineered features.
 
-1. TF-IDF scoring: Calculated term frequency-inverse document frequency scores for words 
-   in each category to identify discriminative terms
+1. Common setup:
+   - Load all 100,000 training reviews from `train_Category.json.gz`.
+   - Labels are the numeric `genreID` values in `{0,1,2,3,4}`.
 
-2. Keyword features: Hand-crafted keyword lists for each category:
-   - Children: "children", "child", "kid", "picture", etc.
-   - Comics/Graphic: "comic", "graphic", "manga", "panel", etc.
-   - Fantasy/Paranormal: "fantasy", "magic", "dragon", "vampire", etc.
-   - Mystery/Thriller: "mystery", "thriller", "crime", "detective", etc.
-   - Young Adult: "love", "romance", "teen", "high school", etc.
+2. If `sklearn` is available (preferred model):
+   - Vectorization:
+     * Use `TfidfVectorizer` with `ngram_range=(1,2)` (unigrams + bigrams),
+       `max_features=50,000`, `min_df=3`, `max_df=0.8`.
+     * Fit on training review texts to get sparse TF-IDF features.
+   - Classifier:
+     * Train a multinomial `LogisticRegression` with `C=2.0`, `penalty="l2"`, `solver="lbfgs"`,
+       `max_iter=5000`, and `n_jobs=-1`.
+   - Prediction:
+     * Transform the test review texts from `test_Category.json.gz` with the same vectorizer,
+       predict `genreID` with the trained classifier, and write `userID,reviewID,prediction` to
+       `predictions_Category.csv`.
 
-3. Category priors: Log probability based on training set distribution
+3. If `sklearn` is not available (fallback model):
+   - Build a vocabulary of the top 4,000 tokens from the training reviews.
+   - For each review, compute:
+     * Term-frequency counts over the vocabulary, transformed with `log1p(tf)`.
+     * Three document-level features: normalized length, normalized unique token count,
+       and normalized average token length.
+     * L2-normalized feature vector plus a bias term.
+   - Train a custom multiclass logistic regression model (softmax) with SGD:
+     * Tune hyperparameters (learning rate, regularization, epochs) on an 80/20 train/validation split.
+     * Retrain on all training data with the best hyperparameters.
+   - Predict categories for the test reviews using this model and write them to
+     `predictions_Category.csv` in the required format.
 
-4. Rating signal: Weak signal using rating patterns (some genres tend to have different 
-   rating distributions)
-
-The model scores each category using a weighted combination of these features and predicts 
-the category with the highest score. Keywords receive strong weights (5-10x) when matched, 
-and TF-IDF scores provide additional discrimination.
-
-Expected improvement: The combination of hand-crafted features and statistical word 
-importance should significantly outperform the baseline's simple keyword matching, 
-especially for ambiguous reviews.
+This approach is substantially more powerful than the provided keyword-based baseline, and the
+TF-IDF + LogisticRegression configuration is similar to what top-performing students use to reach
+high category accuracy.
 
 
 IMPLEMENTATION NOTES
--------------------
-- All code is in assignment1.py
-- The script processes data sequentially: ratings, then read prediction, then categories
+--------------------
+- All code is in `assignment1.py`, which:
+  * Tries to use `surprise` (SVD) for rating prediction if installed, otherwise falls back to a
+    manual MF+bias model.
+  * Uses a custom logistic regression model for read prediction, followed by a 50/50 ranking-based
+    threshold on test pairs.
+  * Tries to use `sklearn` (`TfidfVectorizer` + `LogisticRegression`) for category prediction if
+    installed, otherwise falls back to a custom dictionary-based logistic regression.
 - Training data statistics:
-  * 200,000 interaction records
-  * 27,945 unique users
-  * 6,688 unique books
-  * 100,000 category training reviews
-- No external libraries beyond standard Python (gzip, collections, math, string)
-- Predictions are formatted according to the required CSV structure
+  * 200,000 interaction records in `train_Interactions.csv.gz`.
+  * 27,945 unique users, 6,688 unique books.
+  * 100,000 category training reviews in `train_Category.json.gz`.
+- All prediction files (`predictions_Rating.csv`, `predictions_Read.csv`, `predictions_Category.csv`)
+  follow the required CSV formats and can be regenerated by running `assignment1.py`.
 
 
 POTENTIAL IMPROVEMENTS
 ----------------------
 If more time/resources were available:
-1. Rating prediction: Implement matrix factorization (SVD/ALS) for latent factor models
-2. Read prediction: Use collaborative filtering with user-user or item-item similarity
-3. Category prediction: Use proper ML classifiers (sklearn LogisticRegression, SVM, or 
-   neural networks) with better text preprocessing and n-gram features
-
+1. Rating prediction: explore deeper factorization models or alternative libraries (e.g., tuning Surprise
+   SVD hyperparameters more aggressively, or using neural recommendation models).
+2. Read prediction: experiment with additional features (e.g., user- and item-neighborhood Jaccard scores)
+   and non-linear classifiers (gradient boosting or calibrated ensemble methods).
+3. Category prediction: extend the TF-IDF model with higher-order n-grams, character-level features, or
+   use transformer-based text encoders (e.g., BERT) for even better review representations.
