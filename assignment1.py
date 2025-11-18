@@ -8,6 +8,7 @@ try:
     # High-end text models for category prediction 
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
+    from sklearn.svm import LinearSVC
     SKLEARN_AVAILABLE = True
 except Exception:
     SKLEARN_AVAILABLE = False
@@ -372,7 +373,7 @@ if SKLEARN_AVAILABLE:
     # ---------------------------------------------------------------------
     # High-end model: TF-IDF (unigrams+bigrams) + LogisticRegression
     # ---------------------------------------------------------------------
-    print("Using sklearn TF-IDF + LogisticRegression for category prediction...")
+    print("Using sklearn TF-IDF + LogisticRegression for category prediction (with hyperparameter search)...")
 
     # Import here to avoid errors when sklearn is absent
     from sklearn.model_selection import train_test_split
@@ -381,49 +382,107 @@ if SKLEARN_AVAILABLE:
     texts = [r["review_text"] for r in train_reviews]
     y = [r["genreID"] for r in train_reviews]
 
-    vectorizer = TfidfVectorizer(
-        lowercase=True,
-        ngram_range=(1, 2),
-        max_features=50000,
-        min_df=3,
-        max_df=0.8
+    # Hyperparameter search over vectorizer + classifier + C
+    vec_configs = [
+        {"ngram_range": (1, 2), "max_features": 50000},
+        {"ngram_range": (1, 3), "max_features": 80000},
+    ]
+    C_grid_logreg = [0.5, 1.0, 2.0, 3.0]
+    C_grid_svc = [0.5, 1.0, 2.0]
+
+    overall_best = {
+        "acc": -1.0,
+        "C": None,
+        "model": None,  # "logreg" or "linsvc"
+        "ngram_range": None,
+        "max_features": None,
+    }
+
+    for vc in vec_configs:
+        print(
+            f"Trying vectorizer config: ngram_range={vc['ngram_range']}, "
+            f"max_features={vc['max_features']}"
+        )
+        vectorizer_tmp = TfidfVectorizer(
+            lowercase=True,
+            ngram_range=vc["ngram_range"],
+            max_features=vc["max_features"],
+            min_df=3,
+            max_df=0.8,
+        )
+        X_all = vectorizer_tmp.fit_transform(texts)
+        Xtr, Xva, ytr, yva = train_test_split(
+            X_all, y, test_size=0.2, random_state=0
+        )
+
+        # LogisticRegression grid
+        for C in C_grid_logreg:
+            clf_tmp = LogisticRegression(
+                C=C,
+                penalty="l2",
+                solver="lbfgs",
+                max_iter=5000,
+                n_jobs=-1,
+            )
+            clf_tmp.fit(Xtr, ytr)
+            pred_va = clf_tmp.predict(Xva)
+            acc_va = accuracy_score(yva, pred_va)
+            print(
+                f"  LogReg C={C} -> val acc: {acc_va:.4f} "
+                f"(ngrams={vc['ngram_range']}, max_features={vc['max_features']})"
+            )
+            if acc_va > overall_best["acc"]:
+                overall_best["acc"] = acc_va
+                overall_best["C"] = C
+                overall_best["model"] = "logreg"
+                overall_best["ngram_range"] = vc["ngram_range"]
+                overall_best["max_features"] = vc["max_features"]
+
+        # LinearSVC grid (if available)
+        for C in C_grid_svc:
+            clf_tmp = LinearSVC(C=C)
+            clf_tmp.fit(Xtr, ytr)
+            pred_va = clf_tmp.predict(Xva)
+            acc_va = accuracy_score(yva, pred_va)
+            print(
+                f"  LinearSVC C={C} -> val acc: {acc_va:.4f} "
+                f"(ngrams={vc['ngram_range']}, max_features={vc['max_features']})"
+            )
+            if acc_va > overall_best["acc"]:
+                overall_best["acc"] = acc_va
+                overall_best["C"] = C
+                overall_best["model"] = "linsvc"
+                overall_best["ngram_range"] = vc["ngram_range"]
+                overall_best["max_features"] = vc["max_features"]
+
+    print(
+        "Best validation config: "
+        f"model={overall_best['model']}, "
+        f"ngrams={overall_best['ngram_range']}, "
+        f"max_features={overall_best['max_features']}, "
+        f"C={overall_best['C']} (acc={overall_best['acc']:.4f})"
     )
 
+    # Retrain final vectorizer + model on all data with best config
+    vectorizer = TfidfVectorizer(
+        lowercase=True,
+        ngram_range=overall_best["ngram_range"],
+        max_features=overall_best["max_features"],
+        min_df=3,
+        max_df=0.8,
+    )
     X = vectorizer.fit_transform(texts)
 
-    # Hold out a validation split to tune C
-    Xtr, Xva, ytr, yva = train_test_split(X, y, test_size=0.2, random_state=0)
-
-    best_C = None
-    best_acc = -1.0
-    best_clf = None
-    for C in [0.5, 1.0, 2.0, 4.0]:
-        clf_tmp = LogisticRegression(
-            C=C,
+    if overall_best["model"] == "logreg":
+        clf = LogisticRegression(
+            C=overall_best["C"],
             penalty="l2",
             solver="lbfgs",
             max_iter=5000,
-            n_jobs=-1
+            n_jobs=-1,
         )
-        clf_tmp.fit(Xtr, ytr)
-        pred_va = clf_tmp.predict(Xva)
-        acc_va = accuracy_score(yva, pred_va)
-        print(f"  C={C} -> validation accuracy: {acc_va:.4f}")
-        if acc_va > best_acc:
-            best_acc = acc_va
-            best_C = C
-            best_clf = clf_tmp
-
-    print(f"Best C on validation: {best_C} (acc={best_acc:.4f}); retraining on full data...")
-
-    # Retrain final model on all data with best C
-    clf = LogisticRegression(
-        C=best_C,
-        penalty="l2",
-        solver="lbfgs",
-        max_iter=5000,
-        n_jobs=-1
-    )
+    else:
+        clf = LinearSVC(C=overall_best["C"])
     clf.fit(X, y)
 
     print("Generating category predictions with sklearn model...")
