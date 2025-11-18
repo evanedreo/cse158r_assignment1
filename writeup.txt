@@ -1,7 +1,7 @@
 ASSIGNMENT 1 - BOOK RECOMMENDATION SYSTEMS
 ==========================================
 
-Student: [Your Name]
+Student: Evan Edreo Honggo Widjojo
 Date: November 17, 2025
 
 TASK 1: RATING PREDICTION
